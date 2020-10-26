@@ -126,6 +126,15 @@ target_link_libraries(hdl_graph_slam_nodelet
 )
 add_dependencies(hdl_graph_slam_nodelet ${PROJECT_NAME}_gencpp)
 
+
+add_executable(offline_scan_matching_odometry apps/offline_scan_matching_odometry.cpp)
+target_link_libraries(offline_scan_matching_odometry
+  prefiltering_nodelet
+  scan_matching_odometry_nodelet
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
 catkin_install_python(
   PROGRAMS
     src/${PROJECT_NAME}/bag_player.py

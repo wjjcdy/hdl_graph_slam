@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- arguments -->
+  <arg name="rosbag" default="" />
+  <arg name="conf" defualt="" />
+
+  <node pkg="rosbag" type="record" name="save_odom" args="-O /tmp/odom.bag /odom" output="screen"/>
+
+  <rosparam file="$(arg conf)" command="load"/>
+
+  <node pkg="hdl_graph_slam" type="offline_scan_matching_odometry" name="offline_scan_matching_odometry" output="screen" required="true">
+  	<param name="rosbag" value="$(arg rosbag)" />
+  </node>
+</launch>
