@@ -43,12 +43,15 @@ public:
 
     initialize_params();
 
+    // 前端是否使能imu
     if(private_nh.param<bool>("enable_imu_frontend", false)) {
       msf_pose_sub = nh.subscribe<geometry_msgs::PoseWithCovarianceStamped>("/msf_core/pose", 1, boost::bind(&ScanMatchingOdometryNodelet::msf_pose_callback, this, _1, false));
       msf_pose_after_update_sub = nh.subscribe<geometry_msgs::PoseWithCovarianceStamped>("/msf_core/pose_after_update", 1, boost::bind(&ScanMatchingOdometryNodelet::msf_pose_callback, this, _1, true));
     }
 
+    // 接收滤波后点云
     points_sub = nh.subscribe("/filtered_points", 256, &ScanMatchingOdometryNodelet::cloud_callback, this);
+    // 发布匹配后结果
     read_until_pub = nh.advertise<std_msgs::Header>("/scan_matching_odometry/read_until", 32);
     odom_pub = nh.advertise<nav_msgs::Odometry>("/odom", 32);
     trans_pub = nh.advertise<geometry_msgs::TransformStamped>("/scan_matching_odometry/transform", 32);
@@ -66,6 +69,7 @@ private:
 
     // The minimum tranlational distance and rotation angle between keyframes.
     // If this value is zero, frames are always compared with the previous frame
+    // 关键帧采样间隔
     keyframe_delta_trans = pnh.param<double>("keyframe_delta_trans", 0.25);
     keyframe_delta_angle = pnh.param<double>("keyframe_delta_angle", 0.15);
     keyframe_delta_time = pnh.param<double>("keyframe_delta_time", 1.0);
@@ -76,6 +80,7 @@ private:
     max_acceptable_angle = pnh.param<double>("max_acceptable_angle", 1.0);
 
     // select a downsample method (VOXELGRID, APPROX_VOXELGRID, NONE)
+    // 点云降采样方法
     std::string downsample_method = pnh.param<std::string>("downsample_method", "VOXELGRID");
     double downsample_resolution = pnh.param<double>("downsample_resolution", 0.1);
     if(downsample_method == "VOXELGRID") {
@@ -98,6 +103,7 @@ private:
       downsample_filter = passthrough;
     }
 
+    // 由于帧间匹配的方法，包括icp gicp 和NDT
     registration = select_registration_method(pnh);
   }
 
@@ -110,10 +116,14 @@ private:
       return;
     }
 
+    // 转换为pcl格式
     pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>());
     pcl::fromROSMsg(*cloud_msg, *cloud);
 
+    // 进行帧间匹配
     Eigen::Matrix4f pose = matching(cloud_msg->header.stamp, cloud);
+
+    // 发布激光里程计
     publish_odometry(cloud_msg->header.stamp, cloud_msg->header.frame_id, pose);
 
     // In offline estimation, point clouds until the published time will be supplied
@@ -158,48 +168,50 @@ private:
    * @return the relative pose between the input cloud and the keyframe cloud
    */
   Eigen::Matrix4f matching(const ros::Time& stamp, const pcl::PointCloud<PointT>::ConstPtr& cloud) {
+    // 没有关键帧表明第一帧，进行初始化，不做匹配
     if(!keyframe) {
-      prev_trans.setIdentity();
+      prev_trans.setIdentity();                 // 变换和关键帧位姿均为单位矩阵，即初始位置
       keyframe_pose.setIdentity();
       keyframe_stamp = stamp;
-      keyframe = downsample(cloud);
-      registration->setInputTarget(keyframe);
+      keyframe = downsample(cloud);             // 获取关键帧点云信息
+      registration->setInputTarget(keyframe);   // 作为下一帧匹配的目标点云信息
       return Eigen::Matrix4f::Identity();
     }
 
-    auto filtered = downsample(cloud);
-    registration->setInputSource(filtered);
+    auto filtered = downsample(cloud);          // 新的点云滤波
+    registration->setInputSource(filtered);     // 作为源点云信息，用于匹配
 
     Eigen::Isometry3f msf_delta = Eigen::Isometry3f::Identity();
 
+    // 前端匹配采用里程计获取预测值
     if(private_nh.param<bool>("enable_imu_frontend", false)) {
       if(msf_pose && msf_pose->header.stamp > keyframe_stamp && msf_pose_after_update && msf_pose_after_update->header.stamp > keyframe_stamp) {
-        Eigen::Isometry3d pose0 = pose2isometry(msf_pose_after_update->pose.pose);
-        Eigen::Isometry3d pose1 = pose2isometry(msf_pose->pose.pose);
-        Eigen::Isometry3d delta = pose0.inverse() * pose1;
+        Eigen::Isometry3d pose0 = pose2isometry(msf_pose_after_update->pose.pose);   // 里程计上一刻pose
+        Eigen::Isometry3d pose1 = pose2isometry(msf_pose->pose.pose);                // 里程计此刻pose
+        Eigen::Isometry3d delta = pose0.inverse() * pose1;                           // 变换偏移矩阵
 
-        msf_delta = delta.cast<float>();
-      } else {
+        msf_delta = delta.cast<float>();                                             // 类型转换 为什么需要？？？？
+      } else {                                                                       // 注意考虑时钟同步
         std::cerr << "msf data is too old" << std::endl;
       }
     }
 
     pcl::PointCloud<PointT>::Ptr aligned(new pcl::PointCloud<PointT>());
-    registration->align(*aligned, prev_trans * msf_delta.matrix());
-
+    registration->align(*aligned, prev_trans * msf_delta.matrix());                  // 更新预测位置，作为匹配的初始位置
+ 
     if(!registration->hasConverged()) {
       NODELET_INFO_STREAM("scan matching has not converged!!");
       NODELET_INFO_STREAM("ignore this frame(" << stamp << ")");
-      return keyframe_pose * prev_trans;
+      return keyframe_pose * prev_trans;                                             // 此次匹配失败，则采用上帧变换值
     }
 
-    Eigen::Matrix4f trans = registration->getFinalTransformation();
-    Eigen::Matrix4f odom = keyframe_pose * trans;
+    Eigen::Matrix4f trans = registration->getFinalTransformation();                  // 获取较好的匹配值
+    Eigen::Matrix4f odom = keyframe_pose * trans;                                    // 获取激光里程计
 
-    if(transform_thresholding) {
-      Eigen::Matrix4f delta = prev_trans.inverse() * trans;
-      double dx = delta.block<3, 1>(0, 3).norm();
-      double da = std::acos(Eigen::Quaternionf(delta.block<3, 3>(0, 0)).w());
+    if(transform_thresholding) {                                                     // 是否需要激光里程计异常检测 
+      Eigen::Matrix4f delta = prev_trans.inverse() * trans;                          // 获取两次变换的转移矩阵
+      double dx = delta.block<3, 1>(0, 3).norm();                                    // 平移量
+      double da = std::acos(Eigen::Quaternionf(delta.block<3, 3>(0, 0)).w());        // 旋转量
 
       if(dx > max_acceptable_trans || da > max_acceptable_angle) {
         NODELET_INFO_STREAM("too large transform!!  " << dx << "[m] " << da << "[rad]");
@@ -208,11 +220,12 @@ private:
       }
     }
 
-    prev_trans = trans;
+    prev_trans = trans;                                                              // 更新变换量
 
     auto keyframe_trans = matrix2transform(stamp, keyframe_pose, odom_frame_id, "keyframe");
     keyframe_broadcaster.sendTransform(keyframe_trans);
 
+    // 判断匹配的平移，旋转，或时间是否过大，则应该更新关键帧
     double delta_trans = trans.block<3, 1>(0, 3).norm();
     double delta_angle = std::acos(Eigen::Quaternionf(trans.block<3, 3>(0, 0)).w());
     double delta_time = (stamp - keyframe_stamp).toSec();
