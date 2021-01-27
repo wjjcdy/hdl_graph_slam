@@ -16,9 +16,11 @@ pcl::PointCloud<MapCloudGenerator::PointT>::Ptr MapCloudGenerator::generate(cons
     return nullptr;
   }
 
+  // 开辟并定义一个点云
   pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>());
   cloud->reserve(keyframes.front()->cloud->size() * keyframes.size());
 
+  // 将每个关键帧根据pose转换每个点，并加入cloud中
   for(const auto& keyframe : keyframes) {
     Eigen::Matrix4f pose = keyframe->pose.matrix().cast<float>();
     for(const auto& src_pt : keyframe->cloud->points) {
@@ -36,6 +38,7 @@ pcl::PointCloud<MapCloudGenerator::PointT>::Ptr MapCloudGenerator::generate(cons
   if (resolution <=0.0)
     return cloud; // To get unfiltered point cloud with intensity
 
+  // 根据分辨率进行降采样
   pcl::octree::OctreePointCloud<PointT> octree(resolution);
   octree.setInputCloud(cloud);
   octree.addPointsFromInputCloud();
