@@ -56,9 +56,13 @@ public:
    */
   std::vector<Loop::Ptr> detect(const std::vector<KeyFrame::Ptr>& keyframes, const std::deque<KeyFrame::Ptr>& new_keyframes, hdl_graph_slam::GraphSLAM& graph_slam) {
     std::vector<Loop::Ptr> detected_loops;
+    // 遍历搜索新的keyframe 与 历史keyframe一帧一帧匹配是否出现闭环
     for(const auto& new_keyframe : new_keyframes) {
+      // 所有可能的配对
       auto candidates = find_candidates(keyframes, new_keyframe);
+      // 将新的关键帧配对的历史帧一一匹配，看是否匹配
       auto loop = matching(candidates, new_keyframe, graph_slam);
+      // 存在闭环，则放入闭环队列中
       if(loop) {
         detected_loops.push_back(loop);
       }
@@ -77,9 +81,12 @@ private:
    * @param keyframes      candidate keyframes of loop start
    * @param new_keyframe   loop end keyframe
    * @return loop candidates
+   * 根据new key在历史中查找对应keyframe
    */
   std::vector<KeyFrame::Ptr> find_candidates(const std::vector<KeyFrame::Ptr>& keyframes, const KeyFrame::Ptr& new_keyframe) const {
     // too close to the last registered loop edge
+    // 累计距离过近，则无需进行闭环检测，无意义
+    // 即闭环需要经过一定距离间隔
     if(new_keyframe->accum_distance - last_edge_accum_distance < distance_from_last_edge_thresh) {
       return std::vector<KeyFrame::Ptr>();
     }
@@ -89,10 +96,12 @@ private:
 
     for(const auto& k : keyframes) {
       // traveled distance between keyframes is too small
+      // 闭环匹配的两帧累计距离间隔须有一定范围
       if(new_keyframe->accum_distance - k->accum_distance < accum_distance_thresh) {
         continue;
       }
 
+      // 两帧关键帧的坐标间隔小于一定范围则认为是匹配对
       const auto& pos1 = k->node->estimate().translation();
       const auto& pos2 = new_keyframe->node->estimate().translation();
 
@@ -101,7 +110,7 @@ private:
       if(dist > distance_thresh) {
         continue;
       }
-
+      // 
       candidates.push_back(k);
     }
 
@@ -119,6 +128,7 @@ private:
       return nullptr;
     }
 
+    // 新的关键帧作为参考点云
     registration->setInputTarget(new_keyframe->cloud);
 
     double best_score = std::numeric_limits<double>::max();
@@ -131,6 +141,7 @@ private:
     std::cout << "matching" << std::flush;
     auto t1 = ros::Time::now();
 
+    // 遍历每一个keyframe，求出对应中最佳的关键帧
     pcl::PointCloud<PointT>::Ptr aligned(new pcl::PointCloud<PointT>());
     for(const auto& candidate : candidate_keyframes) {
       registration->setInputSource(candidate->cloud);
@@ -143,6 +154,7 @@ private:
       registration->align(*aligned, guess);
       std::cout << "." << std::flush;
 
+      // 根据匹配结果，找到最佳匹配的一帧，score越小越好
       double score = registration->getFitnessScore(fitness_score_max_range);
       if(!registration->hasConverged() || score > best_score) {
         continue;
@@ -165,8 +177,10 @@ private:
     std::cout << "loop found!!" << std::endl;
     std::cout << "relpose: " << relative_pose.block<3, 1>(0, 3) << " - " << Eigen::Quaternionf(relative_pose.block<3, 3>(0, 0)).coeffs().transpose() << std::endl;
 
+    // 找到闭环，并记录此次闭环时的累计距离
     last_edge_accum_distance = new_keyframe->accum_distance;
 
+    // 返回闭环结果
     return std::make_shared<Loop>(new_keyframe, best_matched, relative_pose);
   }
 
