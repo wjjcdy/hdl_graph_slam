@@ -23,6 +23,7 @@ InformationMatrixCalculator::InformationMatrixCalculator(ros::NodeHandle& nh) {
 InformationMatrixCalculator::~InformationMatrixCalculator() {}
 
 Eigen::MatrixXd InformationMatrixCalculator::calc_information_matrix(const pcl::PointCloud<PointT>::ConstPtr& cloud1, const pcl::PointCloud<PointT>::ConstPtr& cloud2, const Eigen::Isometry3d& relpose) const {
+  // 固定的信息矩阵
   if(use_const_inf_matrix) {
     Eigen::MatrixXd inf = Eigen::MatrixXd::Identity(6, 6);
     inf.topLeftCorner(3, 3).array() /= const_stddev_x;
@@ -30,6 +31,7 @@ Eigen::MatrixXd InformationMatrixCalculator::calc_information_matrix(const pcl::
     return inf;
   }
 
+  // 计算匹配度
   double fitness_score = calc_fitness_score(cloud1, cloud2, relpose);
 
   double min_var_x = std::pow(min_stddev_x, 2);
@@ -37,15 +39,19 @@ Eigen::MatrixXd InformationMatrixCalculator::calc_information_matrix(const pcl::
   double min_var_q = std::pow(min_stddev_q, 2);
   double max_var_q = std::pow(max_stddev_q, 2);
 
+  // 计算协方差
   float w_x = weight(var_gain_a, fitness_score_thresh, min_var_x, max_var_x, fitness_score);
   float w_q = weight(var_gain_a, fitness_score_thresh, min_var_q, max_var_q, fitness_score);
 
+  // 计算信息矩阵
   Eigen::MatrixXd inf = Eigen::MatrixXd::Identity(6, 6);
   inf.topLeftCorner(3, 3).array() /= w_x;
   inf.bottomRightCorner(3, 3).array() /= w_q;
   return inf;
 }
 
+// 计算匹配度
+// 点云对应目标点云，平均误差距离（即需要归一化）
 double InformationMatrixCalculator::calc_fitness_score(const pcl::PointCloud<PointT>::ConstPtr& cloud1, const pcl::PointCloud<PointT>::ConstPtr& cloud2, const Eigen::Isometry3d& relpose, double max_range) {
   pcl::search::KdTree<PointT>::Ptr tree_(new pcl::search::KdTree<PointT>());
   tree_->setInputCloud(cloud1);
