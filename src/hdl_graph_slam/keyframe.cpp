@@ -152,6 +152,7 @@ Eigen::Isometry3d KeyFrame::estimate() const {
   return node->estimate();
 }
 
+// 从关键帧中提取pose 和 cloud
 KeyFrameSnapshot::KeyFrameSnapshot(const Eigen::Isometry3d& pose, const pcl::PointCloud<PointT>::ConstPtr& cloud) : pose(pose), cloud(cloud) {}
 
 KeyFrameSnapshot::KeyFrameSnapshot(const KeyFrame::Ptr& key) : pose(key->node->estimate()), cloud(key->cloud) {}

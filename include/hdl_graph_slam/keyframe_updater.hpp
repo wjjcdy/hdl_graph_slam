@@ -30,6 +30,7 @@ public:
    * @brief decide if a new frame should be registered to the graph
    * @param pose  pose of the frame
    * @return  if true, the frame should be registered
+   * 关键帧采样，如果与上一关键帧在平移或旋转一定角度时，则可记录
    */
   bool update(const Eigen::Isometry3d& pose) {
     // first frame is always registered to the graph
@@ -49,7 +50,7 @@ public:
       return false;
     }
 
-    accum_distance += dx;
+    accum_distance += dx;            // 关键帧间隔距离累计，可获取轨迹长度
     prev_keypose = pose;
     return true;
   }

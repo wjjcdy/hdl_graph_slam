@@ -18,6 +18,7 @@ namespace hdl_graph_slam {
 
 /**
  * @brief KeyFrame (pose node)
+ * 关键帧类，所有参数
  */
 struct KeyFrame {
 public:
@@ -43,14 +44,15 @@ public:
   boost::optional<Eigen::Vector4d> floor_coeffs;  // detected floor's coefficients
   boost::optional<Eigen::Vector3d> utm_coord;     // UTM coord obtained by GPS
 
-  boost::optional<Eigen::Vector3d> acceleration;    //
-  boost::optional<Eigen::Quaterniond> orientation;  //
+  boost::optional<Eigen::Vector3d> acceleration;    //加速度
+  boost::optional<Eigen::Quaterniond> orientation;  //姿态
 
   g2o::VertexSE3* node;  // node instance
 };
 
 /**
  * @brief KeyFramesnapshot for map cloud generation
+ * 优化后的关键帧包括pose和cloud
  */
 struct KeyFrameSnapshot {
 public:
