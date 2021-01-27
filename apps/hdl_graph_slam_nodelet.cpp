@@ -92,9 +92,12 @@ public:
     inf_calclator.reset(new InformationMatrixCalculator(private_nh));
     nmea_parser.reset(new NmeaSentenceParser());
 
+    // gps 约束方差
     gps_time_offset = private_nh.param<double>("gps_time_offset", 0.0);
     gps_edge_stddev_xy = private_nh.param<double>("gps_edge_stddev_xy", 10000.0);
     gps_edge_stddev_z = private_nh.param<double>("gps_edge_stddev_z", 10.0);
+
+    // 地面约束方差
     floor_edge_stddev = private_nh.param<double>("floor_edge_stddev", 10.0);
 
     imu_time_offset = private_nh.param<double>("imu_time_offset", 0.0);
@@ -106,16 +109,22 @@ public:
     points_topic = private_nh.param<std::string>("points_topic", "/velodyne_points");
 
     // subscribers
+    // 同步接收odom和点云, 可将几种topic，根据相同时间戳，仅执行一次callback
     odom_sub.reset(new message_filters::Subscriber<nav_msgs::Odometry>(mt_nh, "/odom", 256));
     cloud_sub.reset(new message_filters::Subscriber<sensor_msgs::PointCloud2>(mt_nh, "/filtered_points", 32));
+    // 采用时间同步近似模式
     sync.reset(new message_filters::Synchronizer<ApproxSyncPolicy>(ApproxSyncPolicy(32), *odom_sub, *cloud_sub));
     sync->registerCallback(boost::bind(&HdlGraphSlamNodelet::cloud_callback, this, _1, _2));
+    
     imu_sub = nh.subscribe("/gpsimu_driver/imu_data", 1024, &HdlGraphSlamNodelet::imu_callback, this);
     floor_sub = nh.subscribe("/floor_detection/floor_coeffs", 1024, &HdlGraphSlamNodelet::floor_coeffs_callback, this);
 
+    // 开启gps功能，gps message可能存在3种message形式
     if(private_nh.param<bool>("enable_gps", true)) {
       gps_sub = mt_nh.subscribe("/gps/geopoint", 1024, &HdlGraphSlamNodelet::gps_callback, this);
+      // 
       nmea_sub = mt_nh.subscribe("/gpsimu_driver/nmea_sentence", 1024, &HdlGraphSlamNodelet::nmea_callback, this);
+      // gps 原始测量值
       navsat_sub = mt_nh.subscribe("/gps/navsat", 1024, &HdlGraphSlamNodelet::navsat_callback, this);
     }
 
@@ -140,18 +149,19 @@ private:
    * @brief received point clouds are pushed to #keyframe_queue
    * @param odom_msg
    * @param cloud_msg
+   * 同步接收odom和cloud
    */
   void cloud_callback(const nav_msgs::OdometryConstPtr& odom_msg, const sensor_msgs::PointCloud2::ConstPtr& cloud_msg) {
     const ros::Time& stamp = cloud_msg->header.stamp;
-    Eigen::Isometry3d odom = odom2isometry(odom_msg);
+    Eigen::Isometry3d odom = odom2isometry(odom_msg);                   // odom转换为eigen格式
 
     pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>());
-    pcl::fromROSMsg(*cloud_msg, *cloud);
+    pcl::fromROSMsg(*cloud_msg, *cloud);                                // cloud 转换为 pcl格式
     if(base_frame_id.empty()) {
       base_frame_id = cloud_msg->header.frame_id;
     }
 
-    if(!keyframe_updater->update(odom)) {
+    if(!keyframe_updater->update(odom)) {                               // 间距较小，不作处理
       std::lock_guard<std::mutex> lock(keyframe_queue_mutex);
       if(keyframe_queue.empty()) {
         std_msgs::Header read_until;
@@ -168,6 +178,7 @@ private:
     double accum_d = keyframe_updater->get_accum_distance();
     KeyFrame::Ptr keyframe(new KeyFrame(stamp, odom, accum_d, cloud));
 
+    // 记录关键帧保存到队列中，关键帧包括时间戳，位置，累计距离和点云
     std::lock_guard<std::mutex> lock(keyframe_queue_mutex);
     keyframe_queue.push_back(keyframe);
   }
@@ -175,18 +186,22 @@ private:
   /**
    * @brief this method adds all the keyframes in #keyframe_queue to the pose graph (odometry edges)
    * @return if true, at least one keyframe was added to the pose graph
+   * 处理关键帧队列，将满足条件的关键帧放入graph中
    */
   bool flush_keyframe_queue() {
     std::lock_guard<std::mutex> lock(keyframe_queue_mutex);
 
+    // 关键帧队列为空，无需处理
     if(keyframe_queue.empty()) {
       return false;
     }
 
+    // 获取地图坐标系下的里程计信息
     trans_odom2map_mutex.lock();
     Eigen::Isometry3d odom2map(trans_odom2map.cast<double>());
     trans_odom2map_mutex.unlock();
 
+    // 每次添加一定个数的关键帧入graph图中
     int num_processed = 0;
     for(int i = 0; i < std::min<int>(keyframe_queue.size(), max_keyframes_per_update); i++) {
       num_processed = i;
@@ -196,11 +211,15 @@ private:
       new_keyframes.push_back(keyframe);
 
       // add pose node
+      // 获取当前关键帧地图坐标系下的pose
       Eigen::Isometry3d odom = odom2map * keyframe->odom;
+      // 添加顶点
       keyframe->node = graph_slam->add_se3_node(odom);
+      // 采用时间戳的哈希表记录顶点帧
       keyframe_hash[keyframe->stamp] = keyframe;
 
       // fix the first node
+      // 历史队列关键帧，不存在，新的仅有一个表明为第一个顶点，锁定固定点
       if(keyframes.empty() && new_keyframes.size() == 1) {
         if(private_nh.param<bool>("fix_first_node", false)) {
           Eigen::MatrixXd inf = Eigen::MatrixXd::Identity(6, 6);
@@ -211,22 +230,30 @@ private:
             inf(i, i) = 1.0 / stddev;
           }
 
+          // 锁定顶点， 即为一个anchor，即锁定第一个关键帧的顶点
           anchor_node = graph_slam->add_se3_node(Eigen::Isometry3d::Identity());
           anchor_node->setFixed(true);
           anchor_edge = graph_slam->add_se3_edge(anchor_node, keyframe->node, Eigen::Isometry3d::Identity(), inf);
         }
       }
 
+      // slam第一个关键帧，仅添加顶点退出
       if(i == 0 && keyframes.empty()) {
         continue;
       }
 
       // add edge between consecutive keyframes
+      // 添加此关键帧与上一关键帧的边
+      // 如果i=0，表明为此队列的第一个关键帧，应当与历史中的最后一个关键帧的边
       const auto& prev_keyframe = i == 0 ? keyframes.back() : keyframe_queue[i - 1];
 
+      // 获取相对位置
       Eigen::Isometry3d relative_pose = keyframe->odom.inverse() * prev_keyframe->odom;
+      // 信息矩阵
       Eigen::MatrixXd information = inf_calclator->calc_information_matrix(keyframe->cloud, prev_keyframe->cloud, relative_pose);
+      // 添加边
       auto edge = graph_slam->add_se3_edge(keyframe->node, prev_keyframe->node, relative_pose, information);
+      // 增加鲁棒性
       graph_slam->add_robust_kernel(edge, private_nh.param<std::string>("odometry_edge_robust_kernel", "NONE"), private_nh.param<double>("odometry_edge_robust_kernel_size", 1.0));
     }
 
@@ -237,10 +264,12 @@ private:
     read_until.frame_id = "/filtered_points";
     read_until_pub.publish(read_until);
 
+    // 删除已经添加到优化图中的关键帧
     keyframe_queue.erase(keyframe_queue.begin(), keyframe_queue.begin() + num_processed + 1);
     return true;
   }
 
+  // gps nmea 格式数据
   void nmea_callback(const nmea_msgs::SentenceConstPtr& nmea_msg) {
     GPRMC grmc = nmea_parser->parse(nmea_msg->sentence);
 
@@ -257,6 +286,7 @@ private:
     gps_callback(gps_msg);
   }
 
+  // gps 原数据
   void navsat_callback(const sensor_msgs::NavSatFixConstPtr& navsat_msg) {
     geographic_msgs::GeoPointStampedPtr gps_msg(new geographic_msgs::GeoPointStamped());
     gps_msg->header = navsat_msg->header;
@@ -268,7 +298,8 @@ private:
 
   /**
    * @brief received gps data is added to #gps_queue
-   * @param gps_msg
+   * @param gps_msg 
+   * gps message并放queue中
    */
   void gps_callback(const geographic_msgs::GeoPointStampedPtr& gps_msg) {
     std::lock_guard<std::mutex> lock(gps_queue_mutex);
@@ -283,6 +314,7 @@ private:
   bool flush_gps_queue() {
     std::lock_guard<std::mutex> lock(gps_queue_mutex);
 
+    // 关键帧不能为空，且gps需有新数据
     if(keyframes.empty() || gps_queue.empty()) {
       return false;
     }
@@ -291,10 +323,12 @@ private:
     auto gps_cursor = gps_queue.begin();
 
     for(auto& keyframe : keyframes) {
+      // 关键帧时间戳大于gps最新的数据，则无需处理
       if(keyframe->stamp > gps_queue.back()->header.stamp) {
         break;
       }
 
+      // 关键帧与gps时间戳对齐， 且未被处理过，否则跳过
       if(keyframe->stamp < (*gps_cursor)->header.stamp || keyframe->utm_coord) {
         continue;
       }
@@ -318,6 +352,7 @@ private:
       }
 
       // convert (latitude, longitude, altitude) -> (easting, northing, altitude) in UTM coordinate
+      // 将gps转换为utm坐标系坐标，即大地坐标系
       geodesy::UTMPoint utm;
       geodesy::fromMsg((*closest_gps)->position, utm);
       Eigen::Vector3d xyz(utm.easting, utm.northing, utm.altitude);
@@ -326,10 +361,13 @@ private:
       if(!zero_utm) {
         zero_utm = xyz;
       }
+      // 减去初始偏移量（即初始gps位置）
       xyz -= (*zero_utm);
 
+      // 关键帧添加gps位置
       keyframe->utm_coord = xyz;
 
+      // 根据gps是否存在高度值，添加概率图边
       g2o::OptimizableGraph::Edge* edge;
       if(std::isnan(xyz.z())) {
         Eigen::Matrix2d information_matrix = Eigen::Matrix2d::Identity() / gps_edge_stddev_xy;
@@ -340,17 +378,21 @@ private:
         information_matrix(2, 2) /= gps_edge_stddev_z;
         edge = graph_slam->add_se3_prior_xyz_edge(keyframe->node, xyz, information_matrix);
       }
+      // 增加鲁棒性
       graph_slam->add_robust_kernel(edge, private_nh.param<std::string>("gps_edge_robust_kernel", "NONE"), private_nh.param<double>("gps_edge_robust_kernel_size", 1.0));
 
       updated = true;
     }
 
+    //剔除相对于keyframe过期的gps数据
     auto remove_loc = std::upper_bound(gps_queue.begin(), gps_queue.end(), keyframes.back()->stamp, [=](const ros::Time& stamp, const geographic_msgs::GeoPointStampedConstPtr& geopoint) { return stamp < geopoint->header.stamp; });
     gps_queue.erase(gps_queue.begin(), remove_loc);
     return updated;
   }
 
+  // imu 放入queue中
   void imu_callback(const sensor_msgs::ImuPtr& imu_msg) {
+    //都不需要
     if(!enable_imu_orientation && !enable_imu_acceleration) {
       return;
     }
@@ -360,8 +402,10 @@ private:
     imu_queue.push_back(imu_msg);
   }
 
+  // imu 处理
   bool flush_imu_queue() {
     std::lock_guard<std::mutex> lock(imu_queue_mutex);
+    // 需存在关键帧，imu和frameid
     if(keyframes.empty() || imu_queue.empty() || base_frame_id.empty()) {
       return false;
     }
@@ -370,10 +414,12 @@ private:
     auto imu_cursor = imu_queue.begin();
 
     for(auto& keyframe : keyframes) {
+      // 无更新的imu数据无需处理
       if(keyframe->stamp > imu_queue.back()->header.stamp) {
         break;
       }
 
+      // imu时间戳已过，imu数据已处理
       if(keyframe->stamp < (*imu_cursor)->header.stamp || keyframe->acceleration) {
         continue;
       }
@@ -390,11 +436,13 @@ private:
         closest_imu = imu;
       }
 
+      // 与关键帧最近的时间戳imu数据，时间间隔超出阈值，则忽略
       imu_cursor = closest_imu;
       if(0.2 < std::abs(((*closest_imu)->header.stamp - keyframe->stamp).toSec())) {
         continue;
       }
 
+      // 获取姿态角和线加速度
       const auto& imu_ori = (*closest_imu)->orientation;
       const auto& imu_acc = (*closest_imu)->linear_acceleration;
 
@@ -408,6 +456,7 @@ private:
       acc_imu.vector = (*closest_imu)->linear_acceleration;
       quat_imu.quaternion = (*closest_imu)->orientation;
 
+      // 将imu位置转换到base坐标系下
       try {
         tf_listener.transformVector(base_frame_id, acc_imu, acc_base);
         tf_listener.transformQuaternion(base_frame_id, quat_imu, quat_base);
@@ -419,16 +468,19 @@ private:
       keyframe->acceleration = Eigen::Vector3d(acc_base.vector.x, acc_base.vector.y, acc_base.vector.z);
       keyframe->orientation = Eigen::Quaterniond(quat_base.quaternion.w, quat_base.quaternion.x, quat_base.quaternion.y, quat_base.quaternion.z);
       keyframe->orientation = keyframe->orientation;
+      // 根据姿态角，判断是否需要平面参数上下反转
       if(keyframe->orientation->w() < 0.0) {
         keyframe->orientation->coeffs() = -keyframe->orientation->coeffs();
       }
 
+      // 使能姿态角
       if(enable_imu_orientation) {
         Eigen::MatrixXd info = Eigen::MatrixXd::Identity(3, 3) / imu_orientation_edge_stddev;
         auto edge = graph_slam->add_se3_prior_quat_edge(keyframe->node, *keyframe->orientation, info);
         graph_slam->add_robust_kernel(edge, private_nh.param<std::string>("imu_orientation_edge_robust_kernel", "NONE"), private_nh.param<double>("imu_orientation_edge_robust_kernel_size", 1.0));
       }
 
+      // 使能加速度
       if(enable_imu_acceleration) {
         Eigen::MatrixXd info = Eigen::MatrixXd::Identity(3, 3) / imu_acceleration_edge_stddev;
         g2o::OptimizableGraph::Edge* edge = graph_slam->add_se3_prior_vec_edge(keyframe->node, -Eigen::Vector3d::UnitZ(), *keyframe->acceleration, info);
@@ -446,6 +498,7 @@ private:
   /**
    * @brief received floor coefficients are added to #floor_coeffs_queue
    * @param floor_coeffs_msg
+   * 接收平面参数并放入队列中
    */
   void floor_coeffs_callback(const hdl_graph_slam::FloorCoeffsConstPtr& floor_coeffs_msg) {
     if(floor_coeffs_msg->coeffs.empty()) {
@@ -475,23 +528,26 @@ private:
         break;
       }
 
+      // 找到平面时间戳对应的关键帧
       auto found = keyframe_hash.find(floor_coeffs->header.stamp);
       if(found == keyframe_hash.end()) {
         continue;
       }
 
+      // 初始化平面节点
       if(!floor_plane_node) {
         floor_plane_node = graph_slam->add_plane_node(Eigen::Vector4d(0.0, 0.0, 1.0, 0.0));
         floor_plane_node->setFixed(true);
       }
 
       const auto& keyframe = found->second;
-
+      // 添加平面约束
       Eigen::Vector4d coeffs(floor_coeffs->coeffs[0], floor_coeffs->coeffs[1], floor_coeffs->coeffs[2], floor_coeffs->coeffs[3]);
       Eigen::Matrix3d information = Eigen::Matrix3d::Identity() * (1.0 / floor_edge_stddev);
       auto edge = graph_slam->add_se3_plane_edge(keyframe->node, floor_plane_node, coeffs, information);
       graph_slam->add_robust_kernel(edge, private_nh.param<std::string>("floor_edge_robust_kernel", "NONE"), private_nh.param<double>("floor_edge_robust_kernel_size", 1.0));
 
+      // 记录
       keyframe->floor_coeffs = coeffs;
 
       updated = true;
@@ -506,18 +562,22 @@ private:
   /**
    * @brief generate map point cloud and publish it
    * @param event
+   * 定时器回调发布拼接后的点云地图
    */
   void map_points_publish_timer_callback(const ros::WallTimerEvent& event) {
+    // 如果无节点点阅地图，或者图优化节点还未更新，则无需优化
     if(!map_points_pub.getNumSubscribers() || !graph_updated) {
       return;
     }
 
     std::vector<KeyFrameSnapshot::Ptr> snapshot;
 
+    // 获取所有关键帧
     keyframes_snapshot_mutex.lock();
     snapshot = keyframes_snapshot;
     keyframes_snapshot_mutex.unlock();
 
+    // 将复制的关键帧队列，拼接成map
     auto cloud = map_cloud_generator->generate(snapshot, map_cloud_resolution);
     if(!cloud) {
       return;
@@ -528,18 +588,20 @@ private:
 
     sensor_msgs::PointCloud2Ptr cloud_msg(new sensor_msgs::PointCloud2());
     pcl::toROSMsg(*cloud, *cloud_msg);
-
+    // 发布map
     map_points_pub.publish(cloud_msg);
   }
 
   /**
    * @brief this methods adds all the data in the queues to the pose graph, and then optimizes the pose graph
    * @param event
+   * 定时器定时回调 进行后端图优化
    */
   void optimization_timer_callback(const ros::WallTimerEvent& event) {
     std::lock_guard<std::mutex> lock(main_thread_mutex);
 
     // add keyframes and floor coeffs in the queues to the pose graph
+    // 处理关键帧队列
     bool keyframe_updated = flush_keyframe_queue();
 
     if(!keyframe_updated) {
@@ -551,30 +613,38 @@ private:
       read_until_pub.publish(read_until);
     }
 
+    // 如果4类传感器数据均无处理结果，则无需进行优化
     if(!keyframe_updated & !flush_floor_queue() & !flush_gps_queue() & !flush_imu_queue()) {
       return;
     }
 
     // loop detection
     std::vector<Loop::Ptr> loops = loop_detector->detect(keyframes, new_keyframes, *graph_slam);
+    // 存在闭环，则将闭环约束加入概率图中
     for(const auto& loop : loops) {
       Eigen::Isometry3d relpose(loop->relative_pose.cast<double>());
+      // 计算信息矩阵
       Eigen::MatrixXd information_matrix = inf_calclator->calc_information_matrix(loop->key1->cloud, loop->key2->cloud, relpose);
+      // 添加闭环的约束边
       auto edge = graph_slam->add_se3_edge(loop->key1->node, loop->key2->node, relpose, information_matrix);
       graph_slam->add_robust_kernel(edge, private_nh.param<std::string>("loop_closure_edge_robust_kernel", "NONE"), private_nh.param<double>("loop_closure_edge_robust_kernel_size", 1.0));
     }
 
+    // 将new_keyframes复制到keyframes，用于历史记录， 而new_keyframes 用于与历史keyframes闭环检测
     std::copy(new_keyframes.begin(), new_keyframes.end(), std::back_inserter(keyframes));
+    // 清除所有新添加的关键帧
     new_keyframes.clear();
 
     // move the first node anchor position to the current estimate of the first node pose
     // so the first node moves freely while trying to stay around the origin
+    // 自适应修改固定点节点
     if(anchor_node && private_nh.param<bool>("fix_first_node_adaptive", true)) {
       Eigen::Isometry3d anchor_target = static_cast<g2o::VertexSE3*>(anchor_edge->vertices()[1])->estimate();
       anchor_node->setEstimate(anchor_target);
     }
 
     // optimize the pose graph
+    // 优化
     int num_iterations = private_nh.param<int>("g2o_solver_num_iterations", 1024);
     graph_slam->optimize(num_iterations);
 
@@ -588,6 +658,8 @@ private:
     std::vector<KeyFrameSnapshot::Ptr> snapshot(keyframes.size());
     std::transform(keyframes.begin(), keyframes.end(), snapshot.begin(), [=](const KeyFrame::Ptr& k) { return std::make_shared<KeyFrameSnapshot>(k); });
 
+    // 每优化一次将优化的结果复制到keyframes_snapshot中，用于发布地图
+    // 采用交换的方法可以让keyframes_snapshot之前的数据内存进行回收
     keyframes_snapshot_mutex.lock();
     keyframes_snapshot.swap(snapshot);
     keyframes_snapshot_mutex.unlock();
@@ -896,6 +968,7 @@ private:
   ros::WallTimer optimization_timer;
   ros::WallTimer map_publish_timer;
 
+  // ros message 时间同步过滤
   std::unique_ptr<message_filters::Subscriber<nav_msgs::Odometry>> odom_sub;
   std::unique_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> cloud_sub;
   std::unique_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync;
