@@ -469,6 +469,7 @@ private:
       keyframe->orientation = Eigen::Quaterniond(quat_base.quaternion.w, quat_base.quaternion.x, quat_base.quaternion.y, quat_base.quaternion.z);
       keyframe->orientation = keyframe->orientation;
       // 根据姿态角，判断是否需要平面参数上下反转
+      // 主要目的是将w变为正
       if(keyframe->orientation->w() < 0.0) {
         keyframe->orientation->coeffs() = -keyframe->orientation->coeffs();
       }
@@ -481,6 +482,7 @@ private:
       }
 
       // 使能加速度
+      // 主要根据加速度计判断重力加速度方向，即z轴方向的加速度和重力方向的误差
       if(enable_imu_acceleration) {
         Eigen::MatrixXd info = Eigen::MatrixXd::Identity(3, 3) / imu_acceleration_edge_stddev;
         g2o::OptimizableGraph::Edge* edge = graph_slam->add_se3_prior_vec_edge(keyframe->node, -Eigen::Vector3d::UnitZ(), *keyframe->acceleration, info);
@@ -489,6 +491,7 @@ private:
       updated = true;
     }
 
+    // 获取第一个满足条件的迭代位置
     auto remove_loc = std::upper_bound(imu_queue.begin(), imu_queue.end(), keyframes.back()->stamp, [=](const ros::Time& stamp, const sensor_msgs::ImuConstPtr& imu) { return stamp < imu->header.stamp; });
     imu_queue.erase(imu_queue.begin(), remove_loc);
 
@@ -512,6 +515,7 @@ private:
   /**
    * @brief this methods associates floor coefficients messages with registered keyframes, and then adds the associated coeffs to the pose graph
    * @return if true, at least one floor plane edge is added to the pose graph
+   * 使能平面约束，需保证整个slam过程中在同一水平面上，否则会加大误差
    */
   bool flush_floor_queue() {
     std::lock_guard<std::mutex> lock(floor_coeffs_queue_mutex);
@@ -649,6 +653,7 @@ private:
     graph_slam->optimize(num_iterations);
 
     // publish tf
+    // 最后一关键帧的位置信息，即为最新的位置信息，进行发布
     const auto& keyframe = keyframes.back();
     Eigen::Isometry3d trans = keyframe->node->estimate() * keyframe->odom.inverse();
     trans_odom2map_mutex.lock();
