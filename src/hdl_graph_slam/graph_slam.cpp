@@ -49,14 +49,17 @@ namespace hdl_graph_slam {
  */
 GraphSLAM::GraphSLAM(const std::string& solver_type) {
   graph.reset(new g2o::SparseOptimizer());
+  // 有三个线性求解器可选  PCG, CSparse, Choldmod
   g2o::SparseOptimizer* graph = dynamic_cast<g2o::SparseOptimizer*>(this->graph.get());
 
   std::cout << "construct solver: " << solver_type << std::endl;
   g2o::OptimizationAlgorithmFactory* solver_factory = g2o::OptimizationAlgorithmFactory::instance();
   g2o::OptimizationAlgorithmProperty solver_property;
   g2o::OptimizationAlgorithm* solver = solver_factory->construct(solver_type, solver_property);
+  // 创建优化器
   graph->setAlgorithm(solver);
 
+  // 未成功初始化退出
   if(!graph->solver()) {
     std::cerr << std::endl;
     std::cerr << "error : failed to allocate solver!!" << std::endl;
@@ -97,6 +100,7 @@ void GraphSLAM::set_solver(const std::string& solver_type) {
   std::cout << "done" << std::endl;
 }
 
+// 获取节点个数
 int GraphSLAM::num_vertices() const {
   return graph->vertices().size();
 }
@@ -104,6 +108,7 @@ int GraphSLAM::num_edges() const {
   return graph->edges().size();
 }
 
+// 添加顶点， 采用标准的3维顶点类型
 g2o::VertexSE3* GraphSLAM::add_se3_node(const Eigen::Isometry3d& pose) {
   g2o::VertexSE3* vertex(new g2o::VertexSE3());
   vertex->setId(static_cast<int>(graph->vertices().size()));
@@ -113,6 +118,7 @@ g2o::VertexSE3* GraphSLAM::add_se3_node(const Eigen::Isometry3d& pose) {
   return vertex;
 }
 
+// 添加平面顶点，采用G2O中原生平明类型
 g2o::VertexPlane* GraphSLAM::add_plane_node(const Eigen::Vector4d& plane_coeffs) {
   g2o::VertexPlane* vertex(new g2o::VertexPlane());
   vertex->setId(static_cast<int>(graph->vertices().size()));
@@ -122,6 +128,7 @@ g2o::VertexPlane* GraphSLAM::add_plane_node(const Eigen::Vector4d& plane_coeffs)
   return vertex;
 }
 
+//添加仅有xyz位置无航向的节点信息
 g2o::VertexPointXYZ* GraphSLAM::add_point_xyz_node(const Eigen::Vector3d& xyz) {
   g2o::VertexPointXYZ* vertex(new g2o::VertexPointXYZ());
   vertex->setId(static_cast<int>(graph->vertices().size()));
@@ -131,6 +138,7 @@ g2o::VertexPointXYZ* GraphSLAM::add_point_xyz_node(const Eigen::Vector3d& xyz) {
   return vertex;
 }
 
+// 添加两个顶点间的边
 g2o::EdgeSE3* GraphSLAM::add_se3_edge(g2o::VertexSE3* v1, g2o::VertexSE3* v2, const Eigen::Isometry3d& relative_pose, const Eigen::MatrixXd& information_matrix) {
   g2o::EdgeSE3* edge(new g2o::EdgeSE3());
   edge->setMeasurement(relative_pose);
@@ -142,6 +150,7 @@ g2o::EdgeSE3* GraphSLAM::add_se3_edge(g2o::VertexSE3* v1, g2o::VertexSE3* v2, co
   return edge;
 }
 
+// 添加顶点与平面顶点的边
 g2o::EdgeSE3Plane* GraphSLAM::add_se3_plane_edge(g2o::VertexSE3* v_se3, g2o::VertexPlane* v_plane, const Eigen::Vector4d& plane_coeffs, const Eigen::MatrixXd& information_matrix) {
   g2o::EdgeSE3Plane* edge(new g2o::EdgeSE3Plane());
   edge->setMeasurement(plane_coeffs);
@@ -153,6 +162,7 @@ g2o::EdgeSE3Plane* GraphSLAM::add_se3_plane_edge(g2o::VertexSE3* v_se3, g2o::Ver
   return edge;
 }
 
+// 可认为landmark与顶点的边， 标准库
 g2o::EdgeSE3PointXYZ* GraphSLAM::add_se3_point_xyz_edge(g2o::VertexSE3* v_se3, g2o::VertexPointXYZ* v_xyz, const Eigen::Vector3d& xyz, const Eigen::MatrixXd& information_matrix) {
   g2o::EdgeSE3PointXYZ* edge(new g2o::EdgeSE3PointXYZ());
   edge->setMeasurement(xyz);
@@ -184,6 +194,7 @@ g2o::EdgePlanePriorDistance* GraphSLAM::add_plane_distance_prior_edge(g2o::Verte
   return edge;
 }
 
+// 先验节点边， 即先验定位位置与节点中的位置边约束，位置仅有xy两项
 g2o::EdgeSE3PriorXY* GraphSLAM::add_se3_prior_xy_edge(g2o::VertexSE3* v_se3, const Eigen::Vector2d& xy, const Eigen::MatrixXd& information_matrix) {
   g2o::EdgeSE3PriorXY* edge(new g2o::EdgeSE3PriorXY());
   edge->setMeasurement(xy);
@@ -194,6 +205,7 @@ g2o::EdgeSE3PriorXY* GraphSLAM::add_se3_prior_xy_edge(g2o::VertexSE3* v_se3, con
   return edge;
 }
 
+// 先验节点边，位置包括xyz三个value
 g2o::EdgeSE3PriorXYZ* GraphSLAM::add_se3_prior_xyz_edge(g2o::VertexSE3* v_se3, const Eigen::Vector3d& xyz, const Eigen::MatrixXd& information_matrix) {
   g2o::EdgeSE3PriorXYZ* edge(new g2o::EdgeSE3PriorXYZ());
   edge->setMeasurement(xyz);
@@ -204,10 +216,11 @@ g2o::EdgeSE3PriorXYZ* GraphSLAM::add_se3_prior_xyz_edge(g2o::VertexSE3* v_se3, c
   return edge;
 }
 
+// 添加一个加速度的边
 g2o::EdgeSE3PriorVec* GraphSLAM::add_se3_prior_vec_edge(g2o::VertexSE3* v_se3, const Eigen::Vector3d& direction, const Eigen::Vector3d& measurement, const Eigen::MatrixXd& information_matrix) {
   Eigen::Matrix<double, 6, 1> m;
-  m.head<3>() = direction;
-  m.tail<3>() = measurement;
+  m.head<3>() = direction;           // 重力加速度方向，或指定加速度方向， 前3元素，为指定方向
+  m.tail<3>() = measurement;         // 后3元素为测量方向
 
   g2o::EdgeSE3PriorVec* edge(new g2o::EdgeSE3PriorVec());
   edge->setMeasurement(m);
@@ -218,6 +231,7 @@ g2o::EdgeSE3PriorVec* GraphSLAM::add_se3_prior_vec_edge(g2o::VertexSE3* v_se3, c
   return edge;
 }
 
+// 添加imu计算的姿态角的边约束
 g2o::EdgeSE3PriorQuat* GraphSLAM::add_se3_prior_quat_edge(g2o::VertexSE3* v_se3, const Eigen::Quaterniond& quat, const Eigen::MatrixXd& information_matrix) {
   g2o::EdgeSE3PriorQuat* edge(new g2o::EdgeSE3PriorQuat());
   edge->setMeasurement(quat);
@@ -272,6 +286,7 @@ g2o::EdgePlanePerpendicular* GraphSLAM::add_plane_perpendicular_edge(g2o::Vertex
   return edge;
 }
 
+// 为边添加鲁棒核，用于降低某些野值的存在，即抑制异常点，防止某些约束错误，导致结果误差较大
 void GraphSLAM::add_robust_kernel(g2o::HyperGraph::Edge* edge, const std::string& kernel_type, double kernel_size) {
   if(kernel_type == "NONE") {
     return;
@@ -289,8 +304,10 @@ void GraphSLAM::add_robust_kernel(g2o::HyperGraph::Edge* edge, const std::string
   edge_->setRobustKernel(kernel);
 }
 
+// g2o进行迭代优化
 int GraphSLAM::optimize(int num_iterations) {
   g2o::SparseOptimizer* graph = dynamic_cast<g2o::SparseOptimizer*>(this->graph.get());
+  // 优化边超过一定数量时
   if(graph->edges().size() < 10) {
     return -1;
   }
@@ -305,10 +322,12 @@ int GraphSLAM::optimize(int num_iterations) {
   graph->setVerbose(true);
 
   std::cout << "chi2" << std::endl;
+  //优化前结果
   double chi2 = graph->chi2();
 
   std::cout << "optimize!!" << std::endl;
   auto t1 = ros::WallTime::now();
+  //执行优化
   int iterations = graph->optimize(num_iterations);
 
   auto t2 = ros::WallTime::now();

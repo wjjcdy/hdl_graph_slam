@@ -39,11 +39,15 @@ public:
   void computeError() override {
     const g2o::VertexSE3* v1 = static_cast<const g2o::VertexSE3*>(_vertices[0]);
 
+    // 仅取左上角的旋转矩阵
     Eigen::Quaterniond estimate = Eigen::Quaterniond(v1->estimate().linear());
 
+    // 根据平面方向，姿态角应保持一致
+    // coeffs为四元数的系数
     if(_measurement.coeffs().dot(estimate.coeffs()) < 0.0) {
       estimate.coeffs() = -estimate.coeffs();
     }
+    // 姿态误差
     _error = estimate.vec() - _measurement.vec();
   }
 

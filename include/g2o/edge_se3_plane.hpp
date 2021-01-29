@@ -41,9 +41,9 @@ public:
     const g2o::VertexSE3* v1 = static_cast<const g2o::VertexSE3*>(_vertices[0]);
     const g2o::VertexPlane* v2 = static_cast<const g2o::VertexPlane*>(_vertices[1]);
 
-    Eigen::Isometry3d w2n = v1->estimate().inverse();
-    Plane3D local_plane = w2n * v2->estimate();
-    _error = local_plane.ominus(_measurement);
+    Eigen::Isometry3d w2n = v1->estimate().inverse();     // 转换到世界坐标系的逆
+    Plane3D local_plane = w2n * v2->estimate();           // 投影到平面顶点上即垂直与z轴的平面
+    _error = local_plane.ominus(_measurement);            // 与实际获得平面参数误差，平面做差
   }
 
   void setMeasurement(const g2o::Plane3D& m) override {

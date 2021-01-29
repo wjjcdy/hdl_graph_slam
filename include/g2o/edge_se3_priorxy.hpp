@@ -36,6 +36,7 @@ public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   EdgeSE3PriorXY() : g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3>() {}
 
+  // 顶点存储的位置与新测量位置的误差
   void computeError() override {
     const g2o::VertexSE3* v1 = static_cast<const g2o::VertexSE3*>(_vertices[0]);
 

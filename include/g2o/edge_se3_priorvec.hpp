@@ -42,8 +42,10 @@ public:
     Eigen::Vector3d direction = _measurement.head<3>();
     Eigen::Vector3d measurement = _measurement.tail<3>();
 
+    // 顶点位置投影重力加速度上
     Eigen::Vector3d estimate = (v1->estimate().linear().inverse() * direction);
 
+    // 测量的重力加速度与估计的误差
     _error = estimate - measurement;
   }
 
